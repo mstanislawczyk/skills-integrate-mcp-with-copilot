@@ -5,11 +5,22 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Response
+from pydantic import BaseModel, Field
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 import os
 from pathlib import Path
+
+from .auth import (
+    SESSION_COOKIE_NAME,
+    SESSION_LIFETIME_SECONDS,
+    create_session_token,
+    get_current_teacher,
+    load_teacher_credentials,
+    require_teacher,
+    verify_password,
+)
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -88,8 +99,54 @@ def get_activities():
     return activities
 
 
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+@app.get("/auth/me")
+def get_auth_status(teacher: str | None = Depends(get_current_teacher)):
+    return {"authenticated": teacher is not None, "username": teacher}
+
+
+@app.post("/auth/login")
+def login(credentials: LoginRequest, response: Response):
+    teachers = load_teacher_credentials()
+    teacher = next(
+        (item for item in teachers if item["username"] == credentials.username),
+        None,
+    )
+    if teacher is None or not verify_password(credentials.password, teacher):
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=create_session_token(teacher["username"]),
+        max_age=SESSION_LIFETIME_SECONDS,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        path="/",
+    )
+    return {"message": "Teacher signed in.", "username": teacher["username"]}
+
+
+@app.post("/auth/logout")
+def logout(response: Response):
+    response.delete_cookie(
+        key=SESSION_COOKIE_NAME,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        path="/",
+    )
+    return {"message": "Teacher signed out."}
+
+
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
+def signup_for_activity(
+    activity_name: str, email: str, teacher: str = Depends(require_teacher)
+):
     """Sign up a student for an activity"""
     # Validate activity exists
     if activity_name not in activities:
@@ -111,7 +168,9 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
+def unregister_from_activity(
+    activity_name: str, email: str, teacher: str = Depends(require_teacher)
+):
     """Unregister a student from an activity"""
     # Validate activity exists
     if activity_name not in activities:
